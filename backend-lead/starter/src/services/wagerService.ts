@@ -5,6 +5,7 @@ import { dec } from '../lib/money';
 export type WagerResult =
   | { kind: 'created'; wager: Wager }
   | { kind: 'not_found' }
+  | { kind: 'wallet_frozen' }
   | { kind: 'insufficient_funds' };
 
 export async function placeWager(walletId: string, amount: string): Promise<WagerResult> {
@@ -14,6 +15,7 @@ export async function placeWager(walletId: string, amount: string): Promise<Wage
       lock: transaction.LOCK.UPDATE,
     });
     if (!wallet) return { kind: 'not_found' };
+    if (wallet.frozen) return { kind: 'wallet_frozen' };
     const nextBalance = dec(wallet.balance).minus(amount);
     if (nextBalance.isNegative()) return { kind: 'insufficient_funds' };
 

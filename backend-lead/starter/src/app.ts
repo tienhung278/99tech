@@ -6,6 +6,7 @@ import { depositsRouter } from './routes/deposits';
 import { pspRouter } from './routes/psp';
 import { wagersRouter } from './routes/wagers';
 import { withdrawalsRouter } from './routes/withdrawals';
+import { reconciliationRouter } from './routes/reconciliation';
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ZodError) {
@@ -26,6 +27,7 @@ export function createApp() {
   app.use('/deposits', depositsRouter);
   app.use('/psp', pspRouter);
   app.use('/wallets', wagersRouter);
+  app.use('/wallets', reconciliationRouter);
   app.use('/withdrawals', withdrawalsRouter);
 
   app.use(errorHandler);

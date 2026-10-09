@@ -26,6 +26,10 @@ withdrawalsRouter.post('/', async (req, res, next) => {
       res.status(422).json({ error: 'insufficient funds' });
       return;
     }
+    if (result.kind === 'wallet_frozen') {
+      res.status(423).json({ error: 'wallet frozen' });
+      return;
+    }
     res.status(201).json({
       id: result.withdrawal.id,
       status: result.withdrawal.status,

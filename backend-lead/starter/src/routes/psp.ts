@@ -31,6 +31,9 @@ pspRouter.post('/callbacks', async (req, res, next) => {
       case 'balance_overflow':
         res.status(422).json({ error: 'wallet balance exceeds DECIMAL(36,18)' });
         return;
+      case 'wallet_frozen':
+        res.status(423).json({ error: 'wallet frozen' });
+        return;
     }
   } catch (err) {
     next(err);
