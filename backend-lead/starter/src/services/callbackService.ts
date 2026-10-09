@@ -1,19 +1,24 @@
 import { sequelize } from '../db/sequelize';
-import { Deposit, Wallet, WalletLedgerEntry } from '../db/models';
+import { Deposit, PspCallbackAudit, Wallet, WalletLedgerEntry } from '../db/models';
 import { dec, fitsMoney } from '../lib/money';
 
 export type CallbackResult =
-  | { kind: 'settled'; status: 'Completed' | 'Failed' }
+  | { kind: 'settled'; status: 'Pending' | 'Completed' | 'Failed' }
   | { kind: 'not_found' | 'amount_mismatch' | 'conflicting_status' | 'balance_overflow' };
 
 export async function settleMockCallback(
   pspRef: string,
-  status: 'completed' | 'failed',
+  status: 'pending' | 'completed' | 'failed',
   amount: string,
 ): Promise<CallbackResult> {
   // The first read locates the immutable owner only. Decisions use the locked copy below.
   const locator = await Deposit.findOne({ where: { providerId: 'mock', pspRef } });
   if (!locator) {
+    await PspCallbackAudit.create({
+      providerId: 'mock', pspRef, depositId: null,
+      reportedStatus: status, reportedAmount: amount,
+      outcome: 'unknown_reference', reconciliationRequired: false,
+    });
     return { kind: 'not_found' };
   }
 
@@ -35,12 +40,33 @@ export async function settleMockCallback(
       throw new Error(`Deposit ${locator.id} changed ownership`);
     }
 
-    const targetStatus = status === 'completed' ? 'Completed' : 'Failed';
+    if (status === 'pending' && deposit.status !== 'Pending') {
+      await PspCallbackAudit.create({
+        providerId: 'mock', pspRef, depositId: deposit.id,
+        reportedStatus: status, reportedAmount: amount,
+        outcome: 'stale_pending', reconciliationRequired: false,
+      }, { transaction });
+      return { kind: 'settled', status: deposit.status } as const;
+    }
+    const targetStatus = status === 'completed' ? 'Completed' : status === 'failed' ? 'Failed' : 'Pending';
     if (deposit.status !== 'Pending' && deposit.status !== targetStatus) {
+      await PspCallbackAudit.create({
+        providerId: 'mock', pspRef, depositId: deposit.id,
+        reportedStatus: status, reportedAmount: amount,
+        outcome: 'contradictory_terminal', reconciliationRequired: true,
+      }, { transaction });
       return { kind: 'conflicting_status' } as const;
     }
     if (!dec(deposit.amount).isEqualTo(dec(amount))) {
+      await PspCallbackAudit.create({
+        providerId: 'mock', pspRef, depositId: deposit.id,
+        reportedStatus: status, reportedAmount: amount,
+        outcome: 'amount_mismatch', reconciliationRequired: false,
+      }, { transaction });
       return { kind: 'amount_mismatch' } as const;
+    }
+    if (status === 'pending') {
+      return { kind: 'settled', status: 'Pending' } as const;
     }
     if (deposit.status !== 'Pending') {
       return { kind: 'settled', status: targetStatus } as const;

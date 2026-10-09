@@ -7,7 +7,7 @@ export const pspRouter = Router();
 
 const callbackBody = z.object({
   pspRef: z.string().min(1),
-  status: z.enum(['completed', 'failed']),
+  status: z.enum(['pending', 'completed', 'failed']),
   amount: z.string().refine(isPositiveMoney, 'amount must be a positive decimal within DECIMAL(36,18)'),
 });
 
