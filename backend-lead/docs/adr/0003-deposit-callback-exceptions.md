@@ -1,0 +1,5 @@
+# Deposit callback exceptions do not move funds
+
+A completed callback with an amount different from the requested deposit is rejected without crediting the wallet or changing the deposit from Pending, allowing a later valid callback to settle it. An unknown PSP reference receives `404` and is recorded for investigation without changing state. A matching duplicate completed callback is acknowledged without another ledger entry. Failed is terminal: a later completed callback is rejected and flagged for reconciliation. A late pending callback after completion is rejected as a state transition, recorded as stale, and acknowledged at the HTTP boundary to avoid endless provider retries. These choices favor explicit investigation over silently crediting an uncertain payment or overriding a terminal state.
+
+Each deposit has a database-unique generated `pspRef` and a stored provider ID. On a valid completed callback, the deposit transition, ledger credit, and operational balance update commit in one transaction; the HTTP acknowledgment follows the commit. If any write fails, the transaction rolls back and the deposit remains Pending.
