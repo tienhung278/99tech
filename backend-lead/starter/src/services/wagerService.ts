@@ -1,6 +1,7 @@
 import { sequelize } from '../db/sequelize';
-import { Wager, Wallet, WalletLedgerEntry } from '../db/models';
+import { Wager, Wallet } from '../db/models';
 import { dec } from '../lib/money';
+import { balanceAfterMovement, recordWalletMovement } from './walletMovement';
 
 export type WagerResult =
   | { kind: 'created'; wager: Wager }
@@ -16,16 +17,12 @@ export async function placeWager(walletId: string, amount: string): Promise<Wage
     });
     if (!wallet) return { kind: 'not_found' };
     if (wallet.frozen) return { kind: 'wallet_frozen' };
-    const nextBalance = dec(wallet.balance).minus(amount);
+    const signedAmount = dec(amount).negated().toFixed(18);
+    const nextBalance = balanceAfterMovement(wallet, signedAmount);
     if (nextBalance.isNegative()) return { kind: 'insufficient_funds' };
 
     const wager = await Wager.create({ walletId, amount }, { transaction });
-    await WalletLedgerEntry.create({
-      walletId,
-      eventKey: `wager:${wager.id}`,
-      amount: dec(amount).negated().toFixed(18),
-    }, { transaction });
-    await wallet.update({ balance: nextBalance.toFixed(18) }, { transaction });
+    await recordWalletMovement(wallet, `wager:${wager.id}`, signedAmount, transaction);
     return { kind: 'created', wager };
   });
 }

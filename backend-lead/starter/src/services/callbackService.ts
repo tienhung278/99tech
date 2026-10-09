@@ -1,6 +1,28 @@
 import { sequelize } from '../db/sequelize';
-import { Deposit, PspCallbackAudit, Wallet, WalletLedgerEntry } from '../db/models';
+import { Transaction } from 'sequelize';
+import { Deposit, PspCallbackAudit, Wallet } from '../db/models';
+import { CallbackAuditOutcome, ReportedCallbackStatus } from '../db/models/pspCallbackAudit';
 import { dec, fitsMoney } from '../lib/money';
+import { balanceAfterMovement, recordWalletMovement } from './walletMovement';
+
+type CallbackEvent = { pspRef: string; status: ReportedCallbackStatus; amount: string };
+
+async function recordCallbackAudit(
+  event: CallbackEvent,
+  depositId: string | null,
+  outcome: CallbackAuditOutcome,
+  transaction?: Transaction,
+): Promise<void> {
+  await PspCallbackAudit.create({
+    providerId: 'mock',
+    pspRef: event.pspRef,
+    depositId,
+    reportedStatus: event.status,
+    reportedAmount: event.amount,
+    outcome,
+    reconciliationRequired: outcome === 'contradictory_terminal',
+  }, { transaction });
+}
 
 export type CallbackResult =
   | { kind: 'settled'; status: 'Pending' | 'Completed' | 'Failed' }
@@ -11,14 +33,11 @@ export async function settleMockCallback(
   status: 'pending' | 'completed' | 'failed',
   amount: string,
 ): Promise<CallbackResult> {
+  const event = { pspRef, status, amount };
   // The first read locates the immutable owner only. Decisions use the locked copy below.
   const locator = await Deposit.findOne({ where: { providerId: 'mock', pspRef } });
   if (!locator) {
-    await PspCallbackAudit.create({
-      providerId: 'mock', pspRef, depositId: null,
-      reportedStatus: status, reportedAmount: amount,
-      outcome: 'unknown_reference', reconciliationRequired: false,
-    });
+    await recordCallbackAudit(event, null, 'unknown_reference');
     return { kind: 'not_found' };
   }
 
@@ -32,7 +51,6 @@ export async function settleMockCallback(
     if (!wallet) {
       throw new Error(`Deposit ${locator.id} has no wallet`);
     }
-    if (wallet.frozen) return { kind: 'wallet_frozen' } as const;
     const deposit = await Deposit.findByPk(locator.id, {
       transaction,
       lock: transaction.LOCK.UPDATE,
@@ -42,28 +60,16 @@ export async function settleMockCallback(
     }
 
     if (status === 'pending' && deposit.status !== 'Pending') {
-      await PspCallbackAudit.create({
-        providerId: 'mock', pspRef, depositId: deposit.id,
-        reportedStatus: status, reportedAmount: amount,
-        outcome: 'stale_pending', reconciliationRequired: false,
-      }, { transaction });
+      await recordCallbackAudit(event, deposit.id, 'stale_pending', transaction);
       return { kind: 'settled', status: deposit.status } as const;
     }
     const targetStatus = status === 'completed' ? 'Completed' : status === 'failed' ? 'Failed' : 'Pending';
     if (deposit.status !== 'Pending' && deposit.status !== targetStatus) {
-      await PspCallbackAudit.create({
-        providerId: 'mock', pspRef, depositId: deposit.id,
-        reportedStatus: status, reportedAmount: amount,
-        outcome: 'contradictory_terminal', reconciliationRequired: true,
-      }, { transaction });
+      await recordCallbackAudit(event, deposit.id, 'contradictory_terminal', transaction);
       return { kind: 'conflicting_status' } as const;
     }
-    if (!dec(deposit.amount).isEqualTo(dec(amount))) {
-      await PspCallbackAudit.create({
-        providerId: 'mock', pspRef, depositId: deposit.id,
-        reportedStatus: status, reportedAmount: amount,
-        outcome: 'amount_mismatch', reconciliationRequired: false,
-      }, { transaction });
+    if (status === 'completed' && !dec(deposit.amount).isEqualTo(dec(amount))) {
+      await recordCallbackAudit(event, deposit.id, 'amount_mismatch', transaction);
       return { kind: 'amount_mismatch' } as const;
     }
     if (status === 'pending') {
@@ -74,16 +80,12 @@ export async function settleMockCallback(
     }
 
     if (targetStatus === 'Completed') {
-      const nextBalance = dec(wallet.balance).plus(deposit.amount);
+      if (wallet.frozen) return { kind: 'wallet_frozen' } as const;
+      const nextBalance = balanceAfterMovement(wallet, deposit.amount);
       if (!fitsMoney(nextBalance)) {
         return { kind: 'balance_overflow' } as const;
       }
-      await WalletLedgerEntry.create({
-        walletId: wallet.id,
-        eventKey: `deposit:${deposit.id}`,
-        amount: deposit.amount,
-      }, { transaction });
-      await wallet.update({ balance: nextBalance.toFixed(18) }, { transaction });
+      await recordWalletMovement(wallet, `deposit:${deposit.id}`, deposit.amount, transaction);
     }
     await deposit.update({ status: targetStatus }, { transaction });
     return { kind: 'settled', status: targetStatus } as const;
