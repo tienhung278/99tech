@@ -1,0 +1,20 @@
+# Adding a PSP safely
+
+A new provider should add an adapter, configuration, and sanitized fixtures. The shared deposit settlement service owns all money movement and never branches on provider-specific payloads.
+
+```text
+POST /psp/:providerId/callbacks (raw bytes + headers)
+  -> configured provider lookup -> adapter.verifyAndNormalize(raw, headers)
+  -> VerifiedDepositEvent -> shared settleDeposit(event)
+  -> deposit state + ledger entry + wallet balance (one DB transaction)
+```
+
+**Boundary.** Register real provider routes with raw-body capture before any JSON parser; retain the exact request bytes used by the provider's signature scheme. Select the adapter from the configured route/provider ID, never from an unverified payload field. An adapter verifies the signature, timestamp/replay window if the scheme supplies one, and required fields before trusting them. Missing, invalid, or unverifiable signatures fail closed and cannot reach settlement. Use the provider's documented canonicalization and constant-time comparison where applicable; do not reserialize JSON before checking a raw-body signature.
+
+The adapter emits a `VerifiedDepositEvent` with `providerId`, opaque `pspRef`, canonical `Pending | Completed | Failed` status, exact decimal-string `amount`, and `currency`. Its status map handles each provider vocabulary explicitly. Convert integer minor units with that currency's configured scale using exact decimal arithmetic; reject malformed, negative, over-precision, or overflowing values rather than rounding. A provider-supplied currency must equal the configured single wallet currency; missing currency is rejected unless the provider contract explicitly omits it and configuration supplies it. There is no currency conversion.
+
+**Shared settlement.** Look up the deposit by its unique PSP reference and require its stored provider ID to match the verified event. Compare normalized amount numerically with the requested amount. In one transaction, lock the deposit and wallet in the service's established order, apply the `Pending -> Completed / Failed` state machine, and, on valid completion, write one unique-key ledger credit and update the wallet balance. A matching retry is acknowledged without another credit. An amount mismatch leaves a Pending deposit untouched for a later matching callback; unknown references, stale events, and contradictory terminal outcomes follow the shared audit/reconciliation policy. Acknowledge completion only after commit. No adapter writes a wallet or ledger row.
+
+**Configuration.** At startup, validate a registry entry for every enabled provider: unique provider ID and callback route, adapter, expected currency and minor-unit scale, complete status mapping, verification scheme, and resolvable secret reference. Reject missing or inconsistent entries before serving callbacks. Resolve secret values from a secret manager or environment at runtime; keep only references and sanitized examples in source control. The exercise's existing `/psp/callbacks` route is an unsigned mock with no supplied currency: it uses configured mock currency and is explicitly not evidence of real-provider verification.
+
+**Fixture contract.** Keep sanitized raw payload bytes, headers, and expected canonical events for valid signatures, missing/invalid/tampered signatures, every provider status, decimal and minor-unit amount variants, missing/mismatched currency, and stale/repeated deliveries. Adapter tests assert verification failure or exact normalization. Run a shared HTTP/settlement contract with a fake provider for an unknown reference, matching retry, concurrent duplicate, amount mismatch followed by a valid callback, stale pending event, and contradictory terminal outcome; assert deposit state, one ledger credit, and wallet balance. CI uses fixtures and the fake provider, with no live PSP calls. A junior engineer adds fixtures and configuration alongside the adapter, then runs this contract before enabling the route.
