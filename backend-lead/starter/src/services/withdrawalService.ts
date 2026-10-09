@@ -1,7 +1,8 @@
 import { QueryTypes } from 'sequelize';
 import { sequelize } from '../db/sequelize';
-import { Wallet, WalletLedgerEntry, Withdrawal } from '../db/models';
+import { Wallet, Withdrawal } from '../db/models';
 import { dec } from '../lib/money';
+import { balanceAfterMovement, recordWalletMovement } from './walletMovement';
 
 export type WithdrawalResult =
   | { kind: 'created'; withdrawal: Withdrawal }
@@ -37,16 +38,12 @@ export async function requestWithdrawal(memberId: string, amount: string): Promi
       return { kind: 'outstanding_turnover', outstandingTurnover: remaining.toFixed(18) };
     }
 
-    const nextBalance = dec(wallet.balance).minus(amount);
+    const signedAmount = dec(amount).negated().toFixed(18);
+    const nextBalance = balanceAfterMovement(wallet, signedAmount);
     if (nextBalance.isNegative()) return { kind: 'insufficient_funds' };
 
     const withdrawal = await Withdrawal.create({ memberId, amount, status: 'Pending' }, { transaction });
-    await WalletLedgerEntry.create({
-      walletId: wallet.id,
-      eventKey: `withdrawal:${withdrawal.id}`,
-      amount: dec(amount).negated().toFixed(18),
-    }, { transaction });
-    await wallet.update({ balance: nextBalance.toFixed(18) }, { transaction });
+    await recordWalletMovement(wallet, `withdrawal:${withdrawal.id}`, signedAmount, transaction);
     return { kind: 'created', withdrawal };
   });
 }

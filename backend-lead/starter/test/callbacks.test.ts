@@ -3,6 +3,7 @@ import { createApp } from '../src/app';
 import { sequelize } from '../src/db/sequelize';
 import { Wallet } from '../src/db/models';
 import '../src/db/models';
+import { waitForWalletLockWaiters } from './support/walletLocks';
 
 const app = createApp();
 
@@ -56,20 +57,6 @@ async function callbackAudits() {
      FROM psp_callback_audits ORDER BY created_at, id`,
   );
   return rows;
-}
-
-async function waitForWalletLockWaiters(expected: number) {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    const [rows] = await sequelize.query(
-      `SELECT count(*)::integer AS count FROM pg_stat_activity
-       WHERE datname = current_database() AND wait_event_type = 'Lock'
-       AND query ILIKE '%wallets%'`,
-    );
-    if ((rows[0] as { count: number }).count >= expected) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`Expected ${expected} callbacks waiting on wallet locks`);
 }
 
 describe('POST /psp/callbacks', () => {
@@ -209,6 +196,20 @@ describe('POST /psp/callbacks', () => {
     }]);
   });
 
+  it('marks a Pending deposit Failed when a failed callback reports a different amount', async () => {
+    const { memberId, depositId, pspRef } = await pendingDeposit('callback-failed-amount', '9.75');
+
+    const failure = await request(app).post('/psp/callbacks').send({
+      pspRef, status: 'failed', amount: '9.00',
+    });
+
+    expect(failure.status).toBe(200);
+    expect(failure.body).toEqual({ status: 'Failed' });
+    expect(await walletBalance(memberId)).toBe('0.000000000000000000');
+    expect(await depositAndLedger(depositId)).toEqual({ deposits: [{ status: 'Failed' }], ledger: [] });
+    expect(await callbackAudits()).toEqual([]);
+  });
+
   it('flags a failed callback after completion without reversing the credit', async () => {
     const { memberId, depositId, pspRef } = await pendingDeposit('callback-contradiction', '9.75');
     const completed = await request(app).post('/psp/callbacks').send({
@@ -231,6 +232,64 @@ describe('POST /psp/callbacks', () => {
       reported_status: 'failed', reported_amount: '9.75',
       outcome: 'contradictory_terminal', reconciliation_required: true,
     }]);
+  });
+
+  it('handles state-only callbacks and audits on a frozen wallet while blocking a new credit', async () => {
+    const completed = await pendingDeposit('callback-frozen-completed', '9.75');
+    expect((await request(app).post('/psp/callbacks').send({
+      pspRef: completed.pspRef, status: 'completed', amount: '9.75',
+    })).status).toBe(200);
+    const failed = await request(app).post('/deposits').send({ memberId: completed.memberId, amount: '4.00' });
+    const waiting = await request(app).post('/deposits').send({ memberId: completed.memberId, amount: '2.00' });
+    expect(failed.status).toBe(201);
+    expect(waiting.status).toBe(201);
+    const wallet = await Wallet.findOne({ where: { memberId: completed.memberId } });
+    expect(wallet).not.toBeNull();
+    await sequelize.query('UPDATE wallets SET balance = :balance WHERE id = :walletId', {
+      replacements: { balance: '10.75', walletId: wallet!.id },
+    });
+    const reconciliation = await request(app).post(`/wallets/${wallet!.id}/reconcile`);
+    expect(reconciliation.status).toBe(200);
+    expect(reconciliation.body.frozen).toBe(true);
+
+    const retry = await request(app).post('/psp/callbacks').send({
+      pspRef: completed.pspRef, status: 'completed', amount: '9.75',
+    });
+    const stale = await request(app).post('/psp/callbacks').send({
+      pspRef: completed.pspRef, status: 'pending', amount: '9.75',
+    });
+    const contradictory = await request(app).post('/psp/callbacks').send({
+      pspRef: completed.pspRef, status: 'failed', amount: '9.75',
+    });
+    const failure = await request(app).post('/psp/callbacks').send({
+      pspRef: failed.body.pspRef, status: 'failed', amount: '3.00',
+    });
+    const pending = await request(app).post('/psp/callbacks').send({
+      pspRef: waiting.body.pspRef, status: 'pending', amount: '2.00',
+    });
+    const blockedCredit = await request(app).post('/psp/callbacks').send({
+      pspRef: waiting.body.pspRef, status: 'completed', amount: '2.00',
+    });
+
+    expect(retry.body).toEqual({ status: 'Completed' });
+    expect(stale.body).toEqual({ status: 'Completed' });
+    expect(contradictory.status).toBe(409);
+    expect(failure.body).toEqual({ status: 'Failed' });
+    expect(pending.body).toEqual({ status: 'Pending' });
+    expect(blockedCredit.status).toBe(423);
+    expect(await walletBalance(completed.memberId)).toBe('10.750000000000000000');
+    const [deposits] = await sequelize.query('SELECT id, status FROM deposits ORDER BY id');
+    expect(deposits).toEqual(expect.arrayContaining([
+      { id: completed.depositId, status: 'Completed' },
+      { id: failed.body.id, status: 'Failed' },
+      { id: waiting.body.id, status: 'Pending' },
+    ]));
+    expect(await ledgerSummary()).toEqual({ count: 1, sum: '9.750000000000000000' });
+    expect(await callbackAudits()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ psp_ref: completed.pspRef, outcome: 'stale_pending', reconciliation_required: false }),
+      expect.objectContaining({ psp_ref: completed.pspRef, outcome: 'contradictory_terminal', reconciliation_required: true }),
+    ]));
+    expect(await callbackAudits()).toHaveLength(2);
   });
 
   it('credits once when two completed callbacks are in flight together', async () => {
