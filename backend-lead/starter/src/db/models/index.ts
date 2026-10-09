@@ -5,6 +5,7 @@ import { Deposit, initDeposit } from './deposit';
 import { WalletLedgerEntry, initWalletLedgerEntry } from './walletLedgerEntry';
 import { PspCallbackAudit, initPspCallbackAudit } from './pspCallbackAudit';
 import { Wager, initWager } from './wager';
+import { Withdrawal, initWithdrawal } from './withdrawal';
 
 initMember(sequelize);
 initWallet(sequelize);
@@ -12,6 +13,7 @@ initDeposit(sequelize);
 initWalletLedgerEntry(sequelize);
 initPspCallbackAudit(sequelize);
 initWager(sequelize);
+initWithdrawal(sequelize);
 
 Member.hasOne(Wallet, { foreignKey: 'memberId', as: 'wallet' });
 Wallet.belongsTo(Member, { foreignKey: 'memberId', as: 'member' });
@@ -21,5 +23,7 @@ Wallet.hasMany(WalletLedgerEntry, { foreignKey: 'walletId', as: 'ledgerEntries' 
 WalletLedgerEntry.belongsTo(Wallet, { foreignKey: 'walletId', as: 'wallet' });
 Wallet.hasMany(Wager, { foreignKey: 'walletId', as: 'wagers' });
 Wager.belongsTo(Wallet, { foreignKey: 'walletId', as: 'wallet' });
+Member.hasMany(Withdrawal, { foreignKey: 'memberId', as: 'withdrawals' });
+Withdrawal.belongsTo(Member, { foreignKey: 'memberId', as: 'member' });
 
-export { Member, Wallet, Deposit, WalletLedgerEntry, PspCallbackAudit, Wager };
+export { Member, Wallet, Deposit, WalletLedgerEntry, PspCallbackAudit, Wager, Withdrawal };
