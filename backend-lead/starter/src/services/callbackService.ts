@@ -4,7 +4,7 @@ import { dec, fitsMoney } from '../lib/money';
 
 export type CallbackResult =
   | { kind: 'settled'; status: 'Pending' | 'Completed' | 'Failed' }
-  | { kind: 'not_found' | 'amount_mismatch' | 'conflicting_status' | 'balance_overflow' };
+  | { kind: 'not_found' | 'amount_mismatch' | 'conflicting_status' | 'balance_overflow' | 'wallet_frozen' };
 
 export async function settleMockCallback(
   pspRef: string,
@@ -32,6 +32,7 @@ export async function settleMockCallback(
     if (!wallet) {
       throw new Error(`Deposit ${locator.id} has no wallet`);
     }
+    if (wallet.frozen) return { kind: 'wallet_frozen' } as const;
     const deposit = await Deposit.findByPk(locator.id, {
       transaction,
       lock: transaction.LOCK.UPDATE,

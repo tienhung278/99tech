@@ -6,6 +6,7 @@ import { dec } from '../lib/money';
 export type WithdrawalResult =
   | { kind: 'created'; withdrawal: Withdrawal }
   | { kind: 'not_found' }
+  | { kind: 'wallet_frozen' }
   | { kind: 'outstanding_turnover'; outstandingTurnover: string }
   | { kind: 'insufficient_funds' };
 
@@ -17,6 +18,7 @@ export async function requestWithdrawal(memberId: string, amount: string): Promi
       lock: transaction.LOCK.UPDATE,
     });
     if (!wallet) return { kind: 'not_found' };
+    if (wallet.frozen) return { kind: 'wallet_frozen' };
 
     // These aggregates must be read after the wallet lock. Every writer of a
     // completed deposit or accepted wager also holds that lock through commit.
